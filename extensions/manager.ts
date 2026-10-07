@@ -36,6 +36,7 @@ export interface SpawnOptions {
 	parentSessionId?: string;
 	model?: string;
 	thinkingLevel?: string;
+	signal?: AbortSignal;
 }
 
 const MAX_AGENTS = 8;
@@ -184,13 +185,13 @@ class RpcChild {
 	}
 
 	async start(options: SpawnOptions): Promise<void> {
-		this.promptDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
+		this.promptDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-live-subagent-"));
 		this.promptFile = path.join(this.promptDir, "prompt.md");
 		const prompt = [
-			"You are a named pi subagent.",
+			"You are a named live pi subagent.",
 			"",
 			`Name: ${this.name}`,
-			`Parent intercom name: ${options.parentName}`,
+			`Parent intercom target: ${options.parentName}`,
 			options.parentSessionId ? `Parent session id: ${options.parentSessionId}` : "",
 			`Working directory: ${this.cwd}`,
 			"",
@@ -198,10 +199,11 @@ class RpcChild {
 			"Use the intercom tool to talk to them:",
 			'- intercom({ action: "list" }) to see peers',
 			`- intercom({ action: "send", to: "${options.parentName}", message: "..." }) to report to the parent`,
+			"If list shows a different alias for the parent, use that alias instead.",
 			'- intercom({ action: "ask", to: "...", message: "..." }) when you need a reply',
 			'- intercom({ action: "reply", message: "..." }) to answer an inbound ask',
 			"",
-			"Stay in this role. Do not spawn nested subagents. Prefer intercom over asking the user.",
+			"Stay in this role. Do not spawn nested live_subagent children. Prefer intercom over asking the user.",
 		].filter(Boolean).join("\n");
 		await fs.promises.writeFile(this.promptFile, prompt, { encoding: "utf8", mode: 0o600 });
 
@@ -213,7 +215,7 @@ class RpcChild {
 			"--append-system-prompt",
 			this.promptFile,
 			"--exclude-tools",
-			"subagent",
+			"live_subagent,subagent",
 		];
 		if (options.model) args.push("--model", options.model);
 		if (options.thinkingLevel) args.push("--thinking", options.thinkingLevel);
@@ -267,17 +269,25 @@ class RpcChild {
 			this.onChange();
 		});
 
-		await new Promise((resolve) => setTimeout(resolve, 150));
+		await this.sleep(150, options.signal);
+		if (options.signal?.aborted) {
+			await this.stop();
+			throw new Error("Cancelled");
+		}
 		if (!this.proc || this.proc.exitCode !== null) {
 			throw new Error(`failed to start ${this.name}`);
 		}
 
 		try {
-			const data = await this.waitForState();
+			const data = await this.waitForState(options.signal);
 			this.sessionId = data.sessionId;
 			this.status = data.isStreaming ? "running" : "idle";
 			this.log("system", `ready session=${this.sessionId ?? "unknown"}`);
 		} catch (error) {
+			if (options.signal?.aborted) {
+				await this.stop();
+				throw new Error("Cancelled");
+			}
 			this.status = "idle";
 			this.log("error", `get_state failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -294,6 +304,15 @@ class RpcChild {
 		}
 		this.log("status", `prompt: ${oneLine(message, 200)}`);
 		await this.send("prompt", { message, streamingBehavior: "followUp" });
+	}
+
+	killNow(): void {
+		if (!this.proc || this.status === "stopped" || this.status === "error") return;
+		try {
+			this.proc.kill("SIGKILL");
+		} catch {
+			/* ignore */
+		}
 	}
 
 	async stop(): Promise<void> {
@@ -427,15 +446,30 @@ class RpcChild {
 		}
 	}
 
-	private async waitForState(): Promise<{ sessionId?: string; sessionName?: string; isStreaming?: boolean }> {
+	private async sleep(ms: number, signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return;
+		await new Promise<void>((resolve) => {
+			const timer = setTimeout(resolve, ms);
+			const onAbort = () => {
+				clearTimeout(timer);
+				resolve();
+			};
+			if (signal) {
+				signal.addEventListener("abort", onAbort, { once: true });
+			}
+		});
+	}
+
+	private async waitForState(signal?: AbortSignal): Promise<{ sessionId?: string; sessionName?: string; isStreaming?: boolean }> {
 		let lastError: Error | undefined;
 		for (let attempt = 0; attempt < 8; attempt++) {
+			if (signal?.aborted) throw new Error("Cancelled");
 			try {
 				const state = await this.send("get_state", {}, 2000);
 				return (state.data ?? {}) as { sessionId?: string; sessionName?: string; isStreaming?: boolean };
 			} catch (error) {
 				lastError = error instanceof Error ? error : new Error(String(error));
-				await new Promise((resolve) => setTimeout(resolve, 200));
+				await this.sleep(200, signal);
 			}
 		}
 		throw lastError ?? new Error("get_state failed");
@@ -480,13 +514,21 @@ export class SubagentManager {
 	private agents = new Map<string, RpcChild>();
 	private listeners = new Set<() => void>();
 	private seq = 0;
+	private processExitBound = false;
+	private readonly onProcessExit = () => {
+		for (const child of this.agents.values()) child.killNow();
+	};
 
-	constructor() {
-		process.once("exit", () => {
-			for (const child of this.agents.values()) {
-				void child.stop();
-			}
-		});
+	bindProcessExit(): void {
+		if (this.processExitBound) return;
+		this.processExitBound = true;
+		process.on("exit", this.onProcessExit);
+	}
+
+	unbindProcessExit(): void {
+		if (!this.processExitBound) return;
+		this.processExitBound = false;
+		process.off("exit", this.onProcessExit);
 	}
 
 	subscribe(listener: () => void): () => void {
@@ -523,6 +565,7 @@ export class SubagentManager {
 		if (this.alive().length >= MAX_AGENTS) {
 			throw new Error(`too many live subagents (max ${MAX_AGENTS})`);
 		}
+		if (options.signal?.aborted) throw new Error("Cancelled");
 		const name = this.allocateName(options.name, [options.parentName]);
 		const child = new RpcChild({
 			id: `${Date.now().toString(36)}-${++this.seq}`,
@@ -533,14 +576,24 @@ export class SubagentManager {
 		});
 		this.agents.set(name, child);
 		this.emit();
+		const onAbort = () => {
+			void child.stop();
+		};
+		options.signal?.addEventListener("abort", onAbort, { once: true });
 		try {
 			await child.start({ ...options, name });
+			if (options.signal?.aborted) {
+				await child.stop();
+				throw new Error("Cancelled");
+			}
 			return child.snapshot();
 		} catch (error) {
 			child.status = "error";
 			child.log("error", error instanceof Error ? error.message : String(error));
 			this.emit();
 			throw error;
+		} finally {
+			options.signal?.removeEventListener("abort", onAbort);
 		}
 	}
 

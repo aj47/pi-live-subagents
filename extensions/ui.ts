@@ -161,7 +161,7 @@ export class SubagentPanel {
 				body.push(selected ? this.theme.bg("selectedBg", pad(line, Math.max(20, Math.min(width, 100) - 2))) : line);
 			}
 		}
-		return this.box(width, "Subagents", body, "↑↓ select  Enter logs  Esc close  · talk via intercom");
+		return this.box(width, "Live subagents", body, "↑↓ select  Enter logs  Esc close  · talk via intercom");
 	}
 
 	private renderLogs(width: number): string[] {
@@ -204,5 +204,5 @@ export function widgetLines(agents: SubagentSnapshot[], theme: Theme): string[] 
 		const color = statusColor(theme, agent.status);
 		return `${agent.name} ${color(agent.status)}`;
 	});
-	return [`subagents  ${parts.join("  ·  ")}`];
+	return [`live subagents  ${parts.join("  ·  ")}`];
 }

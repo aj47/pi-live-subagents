@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
@@ -5,7 +6,7 @@ import { Type } from "typebox";
 import { SubagentManager, type SubagentSnapshot } from "./manager.ts";
 import { SubagentPanel, widgetLines } from "./ui.ts";
 
-const SubagentParams = Type.Object({
+const LiveSubagentParams = Type.Object({
 	action: StringEnum(["spawn", "list", "prompt", "stop", "logs"] as const, {
 		description: "spawn a child, list children, send a prompt, stop one, or read logs",
 	}),
@@ -23,6 +24,18 @@ function formatSnapshot(agent: SubagentSnapshot): string {
 	return bits.join("  ");
 }
 
+function resolveCwd(raw: string | undefined, base: string): string {
+	const trimmed = (raw ?? "").trim().replace(/^@/, "");
+	if (!trimmed) return base;
+	return resolve(base, trimmed);
+}
+
+function parentIntercomName(pi: ExtensionAPI, sessionId: string): string {
+	const named = pi.getSessionName()?.trim();
+	if (named) return named;
+	return sessionId;
+}
+
 export default function (pi: ExtensionAPI) {
 	const manager = new SubagentManager();
 	let uiCtx: ExtensionContext | undefined;
@@ -32,9 +45,9 @@ export default function (pi: ExtensionAPI) {
 		const target = ctx ?? uiCtx;
 		if (!target?.hasUI) return;
 		const agents = manager.list();
-		target.ui.setWidget("subagents", agents.length ? widgetLines(agents, target.ui.theme) : undefined);
+		target.ui.setWidget("live-subagents", agents.length ? widgetLines(agents, target.ui.theme) : undefined);
 		const live = agents.filter((agent) => agent.status !== "stopped" && agent.status !== "error").length;
-		target.ui.setStatus("subagents", live ? `${live} subagent${live === 1 ? "" : "s"}` : undefined);
+		target.ui.setStatus("live-subagents", live ? `${live} live subagent${live === 1 ? "" : "s"}` : undefined);
 	};
 
 	const openPanel = async (ctx: ExtensionContext, initialName?: string) => {
@@ -69,25 +82,27 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		uiCtx = ctx;
+		manager.bindProcessExit();
 		refreshWidget(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
+		manager.unbindProcessExit();
 		await manager.stopAll();
-		uiCtx?.ui.setWidget("subagents", undefined);
-		uiCtx?.ui.setStatus("subagents", undefined);
+		uiCtx?.ui.setWidget("live-subagents", undefined);
+		uiCtx?.ui.setStatus("live-subagents", undefined);
 		uiCtx = undefined;
 	});
 
-	pi.registerShortcut("alt+s", {
-		description: "Open subagent overview",
+	pi.registerShortcut("alt+shift+s", {
+		description: "Open live subagent overview",
 		handler: async (ctx) => {
 			await openPanel(ctx);
 		},
 	});
 
-	pi.registerCommand("subagents", {
-		description: "Open the subagent overview, or /subagents logs <name>",
+	pi.registerCommand("live-subagents", {
+		description: "Open the live subagent overview, or /live-subagents logs <name>",
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
 			if (parts[0] === "logs" && parts[1]) {
@@ -103,20 +118,21 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "subagent",
-		label: "Subagent",
+		name: "live_subagent",
+		label: "Live Subagent",
 		description:
-			"Spawn named child pi agents the parent can watch. Children talk over the existing intercom tool. Actions: spawn, list, prompt, stop, logs.",
-		promptSnippet: "Spawn, list, prompt, stop, or read logs for child pi agents",
+			"Spawn named child pi agents the parent can watch. Children stay alive and talk over the existing intercom tool. Actions: spawn, list, prompt, stop, logs. Not the nicobailon pi-subagents orchestrator.",
+		promptSnippet: "Spawn, list, prompt, stop, or read logs for live child pi agents",
 		promptGuidelines: [
-			"Use subagent to spawn named child pi sessions. They stay alive after spawn and talk through the existing intercom tool.",
+			"Use live_subagent to spawn named child pi sessions that stay alive after spawn and talk through the existing intercom tool.",
 			'After spawning, tell children to use intercom({ action: "list" }) and send/ask/reply to the parent or siblings by name.',
-			"Use /subagents or Alt+S for the overview UI; Enter opens an individual child's logs.",
+			"Use /live-subagents or Alt+Shift+S for the overview UI; Enter opens an individual child's logs.",
+			"Do not use live_subagent for scout/worker/reviewer workflows; that is npm:pi-subagents.",
 		],
-		parameters: SubagentParams,
+		parameters: LiveSubagentParams,
 		renderCall(args, theme) {
 			const label = args.name ? `${args.action} ${args.name}` : args.action;
-			return new Text(theme.fg("toolTitle", `subagent ${label}`), 0, 0);
+			return new Text(theme.fg("toolTitle", `live_subagent ${label}`), 0, 0);
 		},
 		renderResult(result, _options, theme) {
 			const details = result.details as { spawned?: SubagentSnapshot; agents?: SubagentSnapshot[] } | undefined;
@@ -124,123 +140,97 @@ export default function (pi: ExtensionAPI) {
 			const text = spawned
 				? `${spawned.name} ${spawned.status}`
 				: (result.content.find((part) => part.type === "text" && "text" in part)?.text ?? "ok");
-			return new Text(theme.fg(result.isError ? "error" : "toolOutput", text.split("\n")[0] ?? "ok"), 0, 0);
+			return new Text(theme.fg("toolOutput", text.split("\n")[0] ?? "ok"), 0, 0);
 		},
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			try {
-				if (!pi.getSessionName()) pi.setSessionName("parent");
-				const parentName = pi.getSessionName() || "parent";
-				const parentSessionId = ctx.sessionManager.getSessionId();
-				const cwd = params.cwd?.trim() || ctx.cwd;
+			const parentSessionId = ctx.sessionManager.getSessionId();
+			const parentName = parentIntercomName(pi, parentSessionId);
+			const cwd = resolveCwd(params.cwd, ctx.cwd);
 
-				if (signal?.aborted) {
-					return { content: [{ type: "text", text: "Cancelled" }], details: { agents: manager.list() } };
-				}
+			if (signal?.aborted) throw new Error("Cancelled");
 
-				if (params.action === "list") {
-					const agents = manager.list();
-					return {
-						content: [
-							{
-								type: "text",
-								text: agents.length ? agents.map(formatSnapshot).join("\n") : "No subagents.",
-							},
-						],
-						details: { agents },
-					};
-				}
-
-				if (params.action === "logs") {
-					if (!params.name) {
-						return {
-							content: [{ type: "text", text: "logs needs name" }],
-							details: { agents: manager.list() },
-							isError: true,
-						};
-					}
-					const lines = manager.logs(params.name);
-					const count = Math.max(1, Math.min(params.count ?? 40, 200));
-					const slice = lines.slice(-count);
-					return {
-						content: [
-							{
-								type: "text",
-								text: slice.length
-									? slice.map((line) => `[${new Date(line.t).toISOString()}] ${line.kind}: ${line.text}`).join("\n")
-									: `(no logs for ${params.name})`,
-							},
-						],
-						details: { agents: manager.list(), name: params.name },
-					};
-				}
-
-				if (params.action === "stop") {
-					if (!params.name) {
-						return {
-							content: [{ type: "text", text: "stop needs name" }],
-							details: { agents: manager.list() },
-							isError: true,
-						};
-					}
-					await manager.stop(params.name);
-					return {
-						content: [{ type: "text", text: `Stopped ${params.name}` }],
-						details: { agents: manager.list() },
-					};
-				}
-
-				if (params.action === "prompt") {
-					if (!params.name || !params.task?.trim()) {
-						return {
-							content: [{ type: "text", text: "prompt needs name and task" }],
-							details: { agents: manager.list() },
-							isError: true,
-						};
-					}
-					await manager.prompt(params.name, params.task.trim());
-					return {
-						content: [{ type: "text", text: `Prompted ${params.name}` }],
-						details: { agents: manager.list() },
-					};
-				}
-
-				onUpdate?.({ content: [{ type: "text", text: "Spawning subagent..." }], details: { agents: manager.list() } });
-				const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-				const agent = await manager.spawn({
-					name: params.name,
-					task: params.task,
-					cwd,
-					parentName,
-					parentSessionId,
-					model,
-					thinkingLevel: ctx.thinkingLevel,
-				});
-				refreshWidget(ctx);
-				if (ctx.hasUI) ctx.ui.notify(`Spawned ${agent.name}`, "info");
+			if (params.action === "list") {
+				const agents = manager.list();
 				return {
 					content: [
 						{
 							type: "text",
-							text: [
-								`Spawned ${agent.name} [${agent.status}]`,
-								agent.sessionId ? `session ${agent.sessionId}` : "",
-								`Talk over intercom: intercom({ action: "send", to: "${agent.name}", message: "..." })`,
-								"Open /subagents or press Alt+S for the overview; Enter a row for that child's logs.",
-							]
-								.filter(Boolean)
-								.join("\n"),
+							text: agents.length ? agents.map(formatSnapshot).join("\n") : "No live subagents.",
 						},
 					],
-					details: { agents: manager.list(), spawned: agent },
-				};
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				return {
-					content: [{ type: "text", text: message }],
-					details: { agents: manager.list() },
-					isError: true,
+					details: { agents },
 				};
 			}
+
+			if (params.action === "logs") {
+				if (!params.name) throw new Error("logs needs name");
+				const lines = manager.logs(params.name);
+				const count = Math.max(1, Math.min(params.count ?? 40, 200));
+				const slice = lines.slice(-count);
+				return {
+					content: [
+						{
+							type: "text",
+							text: slice.length
+								? slice.map((line) => `[${new Date(line.t).toISOString()}] ${line.kind}: ${line.text}`).join("\n")
+								: `(no logs for ${params.name})`,
+						},
+					],
+					details: { agents: manager.list(), name: params.name },
+				};
+			}
+
+			if (params.action === "stop") {
+				if (!params.name) throw new Error("stop needs name");
+				await manager.stop(params.name);
+				return {
+					content: [{ type: "text", text: `Stopped ${params.name}` }],
+					details: { agents: manager.list() },
+				};
+			}
+
+			if (params.action === "prompt") {
+				if (!params.name || !params.task?.trim()) throw new Error("prompt needs name and task");
+				await manager.prompt(params.name, params.task.trim());
+				return {
+					content: [{ type: "text", text: `Prompted ${params.name}` }],
+					details: { agents: manager.list() },
+				};
+			}
+
+			onUpdate?.({ content: [{ type: "text", text: "Spawning live subagent..." }], details: { agents: manager.list() } });
+			const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+			const agent = await manager.spawn({
+				name: params.name,
+				task: params.task,
+				cwd,
+				parentName,
+				parentSessionId,
+				model,
+				thinkingLevel: ctx.thinkingLevel,
+				signal,
+			});
+			refreshWidget(ctx);
+			if (ctx.hasUI) ctx.ui.notify(`Spawned ${agent.name}`, "info");
+			return {
+				content: [
+					{
+						type: "text",
+						text: [
+							`Spawned ${agent.name} [${agent.status}]`,
+							agent.sessionId ? `session ${agent.sessionId}` : "",
+							`Talk over intercom: intercom({ action: "send", to: "${agent.name}", message: "..." })`,
+							"Open /live-subagents or press Alt+Shift+S for the overview; Enter a row for that child's logs.",
+							pi.getSessionName()
+								? `Children can address this session as "${parentName}".`
+								: `This session is unnamed. Children should intercom({ action: "list" }) and target the parent by session id ${parentSessionId.slice(0, 8)}.`,
+						]
+							.filter(Boolean)
+							.join("\n"),
+					},
+				],
+				details: { agents: manager.list(), spawned: agent },
+			};
 		},
 	});
 }

@@ -1,34 +1,42 @@
 {
-  "name": "pi-subagents",
+  "name": "@aj47/pi-live-subagents",
   "version": "0.1.0",
-  "description": "Spawn named child pi agents with a parent overview UI, per-child logs, and intercom for talk between agents.",
+  "description": "Live named child pi sessions with a parent overview UI, per-child logs, and intercom. Not npm:pi-subagents.",
   "license": "MIT",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi-extension",
-    "subagents",
+    "live-subagents",
     "pi-coding-agent"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aj47/pi-subagents.git"
+    "url": "git+https://github.com/aj47/pi-live-subagents.git"
   },
   "files": [
-    "extensions/**/*.ts",
+    "extensions/index.ts",
+    "extensions/manager.ts",
+    "extensions/ui.ts",
     "skills/**/*",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./extensions"
+      "./extensions/index.ts"
     ],
     "skills": [
       "./skills"
     ]
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
