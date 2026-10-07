@@ -9,7 +9,9 @@ Use the `live_subagent` tool to spawn named child `pi` processes. They stay aliv
 
 This is not `npm:pi-subagents`. Do not use `live_subagent` for scout/worker/reviewer workflows.
 
-Children talk with the existing `intercom` tool. After spawning, tell them to `intercom({ action: "list" })` and send/ask/reply to the parent or siblings by name.
+If the `intercom` tool is available, children talk with it. After spawning, tell them to `intercom({ action: "list" })` and send/ask/reply to the parent or siblings by name.
+
+If `intercom` is missing, do not tell children to use it. Steer with `live_subagent prompt` and read `live_subagent logs`. Mention `pi install npm:pi-intercom` once if sibling chat would help.
 
 ## Spawn
 
@@ -33,4 +35,4 @@ live_subagent({ action: "prompt", name: "berry", task: "Stop and summarize." })
 live_subagent({ action: "stop", name: "berry" })
 ```
 
-Do not spawn nested live subagents from a child. Prefer intercom over asking the user.
+Do not spawn nested live subagents from a child. Prefer intercom when it exists; otherwise prefer prompt/logs over asking the user.

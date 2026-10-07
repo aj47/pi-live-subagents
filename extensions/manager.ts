@@ -37,6 +37,7 @@ export interface SpawnOptions {
 	model?: string;
 	thinkingLevel?: string;
 	signal?: AbortSignal;
+	intercomAvailable?: boolean;
 }
 
 const MAX_AGENTS = 8;
@@ -126,6 +127,40 @@ function oneLine(text: string, max: number): string {
 	return `${compact.slice(0, Math.max(0, max - 1))}…`;
 }
 
+function childSystemPrompt(name: string, cwd: string, options: SpawnOptions): string {
+	const lines = [
+		"You are a named live pi subagent.",
+		"",
+		`Name: ${name}`,
+		`Working directory: ${cwd}`,
+	];
+	if (options.intercomAvailable) {
+		lines.push(
+			`Parent intercom target: ${options.parentName}`,
+			options.parentSessionId ? `Parent session id: ${options.parentSessionId}` : "",
+			"",
+			"You share a machine-local intercom with the parent and sibling subagents.",
+			"Use the intercom tool to talk to them:",
+			'- intercom({ action: "list" }) to see peers',
+			`- intercom({ action: "send", to: "${options.parentName}", message: "..." }) to report to the parent`,
+			"If list shows a different alias for the parent, use that alias instead.",
+			'- intercom({ action: "ask", to: "...", message: "..." }) when you need a reply',
+			'- intercom({ action: "reply", message: "..." }) to answer an inbound ask',
+			"",
+			"Stay in this role. Do not spawn nested live_subagent children. Prefer intercom over asking the user.",
+		);
+	} else {
+		lines.push(
+			"",
+			"pi-intercom is not installed in this session.",
+			"The parent watches your logs and can send follow-ups with live_subagent prompt.",
+			"Do not try to call an intercom tool. Work on the assigned task and write progress in your replies.",
+			"Stay in this role. Do not spawn nested live_subagent children.",
+		);
+	}
+	return lines.filter(Boolean).join("\n");
+}
+
 class RpcChild {
 	readonly id: string;
 	readonly name: string;
@@ -187,24 +222,7 @@ class RpcChild {
 	async start(options: SpawnOptions): Promise<void> {
 		this.promptDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-live-subagent-"));
 		this.promptFile = path.join(this.promptDir, "prompt.md");
-		const prompt = [
-			"You are a named live pi subagent.",
-			"",
-			`Name: ${this.name}`,
-			`Parent intercom target: ${options.parentName}`,
-			options.parentSessionId ? `Parent session id: ${options.parentSessionId}` : "",
-			`Working directory: ${this.cwd}`,
-			"",
-			"You share a machine-local intercom with the parent and sibling subagents.",
-			"Use the intercom tool to talk to them:",
-			'- intercom({ action: "list" }) to see peers',
-			`- intercom({ action: "send", to: "${options.parentName}", message: "..." }) to report to the parent`,
-			"If list shows a different alias for the parent, use that alias instead.",
-			'- intercom({ action: "ask", to: "...", message: "..." }) when you need a reply',
-			'- intercom({ action: "reply", message: "..." }) to answer an inbound ask',
-			"",
-			"Stay in this role. Do not spawn nested live_subagent children. Prefer intercom over asking the user.",
-		].filter(Boolean).join("\n");
+		const prompt = childSystemPrompt(this.name, this.cwd, options);
 		await fs.promises.writeFile(this.promptFile, prompt, { encoding: "utf8", mode: 0o600 });
 
 		const args = [

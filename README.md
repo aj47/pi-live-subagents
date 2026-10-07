@@ -26,17 +26,23 @@ The two packages can coexist because the tool and command names are different. D
 
 ## Install
 
+Recommended (spawn + sibling chat):
+
 ```sh
 pi install git:github.com/aj47/pi-live-subagents
+pi install npm:pi-intercom
 ```
 
 Then restart pi or run `/reload`.
 
-Children talk over intercom. Install that too if you do not already have it:
+`pi-intercom` is optional. This package does not bundle it, so a single `pi install` will not silently pull another extension. Without intercom you can still spawn, watch logs, and steer children:
 
-```sh
-pi install npm:pi-intercom
+```ts
+live_subagent({ action: "prompt", name: "berry", task: "Keep going." })
+live_subagent({ action: "logs", name: "berry" })
 ```
+
+On spawn, if `intercom` is missing, the tool result tells you so and the child is instructed not to call it. Install intercom later and `/reload` to get sibling chat.
 
 Optional: `/name parent` in the parent session so children have a stable intercom target. If you skip that, they `list` and address the parent by session id.
 
@@ -73,7 +79,7 @@ live_subagent({ action: "stop", name: "berry" })
 
 ## How children talk
 
-After spawn:
+With `pi-intercom` installed:
 
 ```ts
 intercom({ action: "list" })
@@ -81,6 +87,8 @@ intercom({ action: "send", to: "parent", message: "Joined at (25,25)" })
 intercom({ action: "ask", to: "berry", message: "How many harvests?" })
 intercom({ action: "reply", message: "3 so far" })
 ```
+
+Without it, the parent is the bus: `live_subagent prompt` to steer, `live_subagent logs` or `/live-subagents` to read.
 
 ## Lifecycle
 

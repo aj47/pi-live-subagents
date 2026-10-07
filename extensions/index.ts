@@ -36,6 +36,10 @@ function parentIntercomName(pi: ExtensionAPI, sessionId: string): string {
 	return sessionId;
 }
 
+function hasIntercom(pi: ExtensionAPI): boolean {
+	return pi.getAllTools().some((tool) => tool.name === "intercom");
+}
+
 export default function (pi: ExtensionAPI) {
 	const manager = new SubagentManager();
 	let uiCtx: ExtensionContext | undefined;
@@ -121,11 +125,12 @@ export default function (pi: ExtensionAPI) {
 		name: "live_subagent",
 		label: "Live Subagent",
 		description:
-			"Spawn named child pi agents the parent can watch. Children stay alive and talk over the existing intercom tool. Actions: spawn, list, prompt, stop, logs. Not the nicobailon pi-subagents orchestrator.",
+			"Spawn named child pi agents the parent can watch. Children stay alive. If pi-intercom is installed they talk over intercom; otherwise use prompt/logs. Actions: spawn, list, prompt, stop, logs. Not the nicobailon pi-subagents orchestrator.",
 		promptSnippet: "Spawn, list, prompt, stop, or read logs for live child pi agents",
 		promptGuidelines: [
-			"Use live_subagent to spawn named child pi sessions that stay alive after spawn and talk through the existing intercom tool.",
-			'After spawning, tell children to use intercom({ action: "list" }) and send/ask/reply to the parent or siblings by name.',
+			"Use live_subagent to spawn named child pi sessions that stay alive after spawn.",
+			"If the intercom tool is available, tell children to intercom({ action: \"list\" }) and send/ask/reply to the parent or siblings by name.",
+			"If intercom is missing, coordinate with live_subagent prompt and live_subagent logs. Mention pi install npm:pi-intercom once if sibling chat would help.",
 			"Use /live-subagents or Alt+Shift+S for the overview UI; Enter opens an individual child's logs.",
 			"Do not use live_subagent for scout/worker/reviewer workflows; that is npm:pi-subagents.",
 		],
@@ -146,6 +151,7 @@ export default function (pi: ExtensionAPI) {
 			const parentSessionId = ctx.sessionManager.getSessionId();
 			const parentName = parentIntercomName(pi, parentSessionId);
 			const cwd = resolveCwd(params.cwd, ctx.cwd);
+			const intercomAvailable = hasIntercom(pi);
 
 			if (signal?.aborted) throw new Error("Cancelled");
 
@@ -209,9 +215,27 @@ export default function (pi: ExtensionAPI) {
 				model,
 				thinkingLevel: ctx.thinkingLevel,
 				signal,
+				intercomAvailable,
 			});
 			refreshWidget(ctx);
-			if (ctx.hasUI) ctx.ui.notify(`Spawned ${agent.name}`, "info");
+			if (ctx.hasUI) {
+				ctx.ui.notify(
+					intercomAvailable ? `Spawned ${agent.name}` : `Spawned ${agent.name} (no intercom; use prompt/logs)`,
+					intercomAvailable ? "info" : "warning",
+				);
+			}
+			const talk = intercomAvailable
+				? [
+						`Talk over intercom: intercom({ action: "send", to: "${agent.name}", message: "..." })`,
+						pi.getSessionName()
+							? `Children can address this session as "${parentName}".`
+							: `This session is unnamed. Children should intercom({ action: "list" }) and target the parent by session id ${parentSessionId.slice(0, 8)}.`,
+				  ]
+				: [
+						"pi-intercom is not installed, so children cannot message each other.",
+						`Steer this child with live_subagent({ action: "prompt", name: "${agent.name}", task: "..." }) and read live_subagent({ action: "logs", name: "${agent.name}" }).`,
+						"For sibling chat, also run: pi install npm:pi-intercom",
+				  ];
 			return {
 				content: [
 					{
@@ -219,17 +243,14 @@ export default function (pi: ExtensionAPI) {
 						text: [
 							`Spawned ${agent.name} [${agent.status}]`,
 							agent.sessionId ? `session ${agent.sessionId}` : "",
-							`Talk over intercom: intercom({ action: "send", to: "${agent.name}", message: "..." })`,
+							...talk,
 							"Open /live-subagents or press Alt+Shift+S for the overview; Enter a row for that child's logs.",
-							pi.getSessionName()
-								? `Children can address this session as "${parentName}".`
-								: `This session is unnamed. Children should intercom({ action: "list" }) and target the parent by session id ${parentSessionId.slice(0, 8)}.`,
 						]
 							.filter(Boolean)
 							.join("\n"),
 					},
 				],
-				details: { agents: manager.list(), spawned: agent },
+				details: { agents: manager.list(), spawned: agent, intercomAvailable },
 			};
 		},
 	});
